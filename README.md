@@ -12,16 +12,18 @@ Requirements: Python 3.10+ and Flask (the only dependency).
 
 ```bash
 pip install -r requirements.txt
-python app.py                 # open http://127.0.0.1:5000
-python -m unittest -v         # 37 tests: test vectors + attack simulations
+python app.py                 # open http://127.0.0.1:8000
+python -m unittest -v         # 42 tests: test vectors + attack simulations
+python benchmark.py           # AES vs DES vs RC4 timing and ciphertext tables (Markdown)
 ```
 
 The database (`instance/securevault.sqlite3`) and encrypted files (`instance/encrypted_files/`) are created on first start. Settings live in `config.py`; the most useful environment variables are:
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `SV_MAX_UPLOAD_MB` | 20 | Upload limit. Pure-Python AES encrypts about 0.75 MB/s, so 20 MB takes about 25 s. |
-| `SV_HTTPS` | 0 | Set to 1 behind HTTPS: enables the `Secure` cookie flag, `__Host-` cookie prefix and HSTS. |
+| `SV_MAX_UPLOAD_MB` | 20 | Upload limit. Every file is encrypted with AES (~1.2 MB/s), DES (~0.7 MB/s) and RC4 (~8 MB/s), so 20 MB takes about 50 s. |
+| `SV_PORT` | 8000 | Port to listen on. Not 5000: macOS AirPlay Receiver uses it and returns an empty page. |
+| `SV_HTTPS` | 0 | Set to 1 behind HTTPS: enables the `Secure` cookie flag and `__Host-` cookie prefix. |
 | `SV_PBKDF2_ITERATIONS` | 600000 | Password hashing work factor. |
 
 ## 2. Project structure
@@ -32,20 +34,21 @@ config.py              settings
 db.py                  SQLite schema and connection (parameterised queries only)
 privacy.py             GDPR / UU PDP classification of every field, profile encryption
 lab.py                 Crypto Lab pages (AES/DES/RC4 traces, ECB vs CBC, hashing vs encryption)
+analysis.py            AES vs DES vs RC4: timing records, statistics, ciphertext breakdown
+benchmark.py           the same comparison from the command line, for the report
 crypto/
   aes.py               AES from scratch: GF(2^8) maths, S-box, 4 round operations, key expansion
   des.py               DES from scratch: Feistel network, S-boxes, key schedule
   rc4.py               RC4: KSA and PRGA
   modes.py             PKCS#7 padding, ECB and CBC modes (work with AES and DES)
-  envelope.py          AES-256-CBC + HMAC-SHA256 (encrypt-then-MAC), key wrapping
+  envelope.py          AES-CBC / DES-CBC / RC4 + HMAC-SHA256 (encrypt-then-MAC), key wrapping
   passwords.py         PBKDF2 password hashing and key derivation
 security/
   sessions.py          server-side sessions and CSRF tokens
-  ratelimit.py         brute-force protection
   uploads.py           upload allow-list and file-signature checks
-  headers.py           Content-Security-Policy and other security headers
 templates/, static/    HTML (no JavaScript at all) and one CSS file
 tests/                 test_crypto.py (known-answer tests), test_app.py (attack tests)
+docs/benchmark-results.md   output of benchmark.py used in the report
 ```
 
 ## 3. How the system works
@@ -56,7 +59,7 @@ tests/                 test_crypto.py (known-answer tests), test_app.py (attack 
 password ──PBKDF2 (salt A)──► password hash          stored, used only to CHECK the password
 password ──PBKDF2 (salt B)──► KEK (key-encryption key)  never stored, exists only during login
 random 256-bit DEK (data-encryption key) ──sealed with KEK──► wrapped_dek   stored
-profile fields, files, file names ──sealed with DEK──► ciphertext          stored
+profile fields, files, file names ──sealed with DEK──► 3 ciphertexts (AES, DES, RC4)  stored
 ```
 
 Each user has their own random DEK. It is stored only in encrypted ("wrapped") form, and the key that unwraps it is derived from the user's password. Consequences worth explaining:
@@ -77,20 +80,19 @@ Each user has their own random DEK. It is stored only in encrypted ("wrapped") f
 ```
 POST /login
   1. CSRF token check                         (all POST requests)
-  2. Brute-force check: too many failures?    -> HTTP 429
-  3. SELECT user with a parameterised query
-  4. verify_password() with constant-time compare
+  2. SELECT user with a parameterised query
+  3. verify_password() with constant-time compare
        unknown user -> verify against a dummy hash anyway (same timing, same message)
-  5. KEK = PBKDF2(password, kek_salt); DEK = unwrap(KEK, wrapped_dek)
-  6. Delete the old session, create a new one holding user_id + DEK (server memory only)
-  7. Redirect to /dashboard
+  4. KEK = PBKDF2(password, kek_salt); DEK = unwrap(KEK, wrapped_dek)
+  5. Delete the old session, create a new one holding user_id + DEK (server memory only)
+  6. Redirect to /dashboard
 ```
 
 ### 3.4 Storing and retrieving a file
 
-Upload: check the category's extension allow-list and the file's real signature → generate a random 128-bit file ID → `seal(DEK, file bytes)` → write to `instance/encrypted_files/<id>.bin` → store the encrypted metadata (original name, type, size) in the `files` table.
+Upload: check the category's extension allow-list and the file's real signature → generate a random 128-bit file ID → seal the file bytes three times with the DEK, once per cipher → write `instance/encrypted_files/<id>.aes.bin`, `<id>.des.bin` and `<id>.rc4.bin` → store the metadata (original name, type, size), also sealed with each cipher, in the `files` table (`meta_ciphertext`, `meta_des`, `meta_rc4`). Each encryption is timed and recorded in `timings`.
 
-Download: the session must be logged in → the file ID must match `^[0-9a-f]{32}$` → `SELECT ... WHERE id = ? AND user_id = ?` → verify the HMAC, decrypt with the session's DEK → send as an attachment.
+Download: the session must be logged in → the file ID must match `^[0-9a-f]{32}$` → `SELECT ... WHERE id = ? AND user_id = ?` → pick the copy from `?alg=aes|des|rc4` (AES by default) → verify the HMAC, decrypt with the session's DEK (timed) → send as an attachment.
 
 ## 4. Cryptography
 
@@ -109,13 +111,15 @@ Everything is built from first principles. Bytes are elements of GF(2^8); `xtime
 
 **Performance note.** The step-by-step version runs at about 200 KB/s. For file storage, `encrypt_block` switches to a T-table version (section 5 of `aes.py`) that precomputes SubBytes + ShiftRows + MixColumns per byte value, the same trick classic C implementations use. It is the same cipher, and `test_traced_and_fast_paths_agree` checks both paths give identical results on random inputs. The Crypto Lab always uses the readable path.
 
-### 4.2 DES (crypto/des.py) — educational only
+### 4.2 DES (crypto/des.py) — broken, used only for the required comparison copy
 
 A 16-round Feistel network: `L_i = R_(i-1)`, `R_i = L_(i-1) XOR f(R_(i-1), K_i)`, with `f = P(S-boxes(E(R) XOR K))`. Decryption is the same function with the round keys reversed, so `f` never needs to be invertible. The final permutation is computed as the inverse of IP to rule out typos. DES is broken because its key is only 56 bits.
 
-### 4.3 RC4 (crypto/rc4.py) — educational only
+Like AES, DES has a readable bit-by-bit path (used by the lab trace) and a fast table path used for stored data: IP/FP as 8 byte-lookups, the E expansion as a 1-bit rotation, and S-boxes + P merged into 8 "SP" tables, all computed from the standard tables. The fast path is about 11x faster (0.06 → 0.7 MB/s) and a test checks both give identical output.
 
-KSA shuffles `S = [0..255]` using the key; PRGA keeps swapping and outputs `S[(S[i] + S[j]) mod 256]` as keystream, which is XORed with the data. The lab demonstrates the classic failure: with a reused key, `C1 XOR C2 = P1 XOR P2`, so knowing one message reveals the other.
+### 4.3 RC4 (crypto/rc4.py) — broken, used only for the required comparison copy
+
+KSA shuffles `S = [0..255]` using the key; PRGA keeps swapping and outputs `S[(S[i] + S[j]) mod 256]` as keystream, which is XORed with the data. The lab demonstrates the classic failure: with a reused key, `C1 XOR C2 = P1 XOR P2`, so knowing one message reveals the other. For stored data each message therefore gets its own key, `HMAC(rc4_key, random nonce)`, and the first 1536 keystream bytes are discarded (RC4-drop1536, RFC 4345) because they are the most biased.
 
 ### 4.4 Modes of operation (crypto/modes.py)
 
@@ -129,11 +133,17 @@ Both modes work with AES (16-byte blocks) and DES (8-byte blocks). PKCS#7 paddin
 CBC alone gives confidentiality, not integrity: an attacker could flip bits or exploit padding errors (a padding-oracle attack). So every value is sealed as
 
 ```
-version | IV | AES-256-CBC ciphertext | HMAC-SHA256(version | context | IV | ciphertext)
+version | IV/nonce | ciphertext | HMAC-SHA256(version | context | IV | ciphertext)
+
+0x01  AES-256-CBC    16-byte IV     (the primary copy the app reads by default)
+0x02  DES-CBC         8-byte IV
+0x03  RC4-drop1536   16-byte nonce
 ```
 
+The assignment requires all stored data to be encrypted with AES, RC4 and DES, so `seal_all` produces one sealed copy per cipher and all three are stored. Each copy decrypts on its own (the vault can show the profile from any copy, and every file can be downloaded from any copy). Block ciphers use CBC, never ECB.
+
 * **Encrypt-then-MAC**: the tag is verified (constant-time) before any decryption happens.
-* **Separate keys** for AES and HMAC, both derived from the DEK with HMAC.
+* **Separate keys** for each cipher and for each cipher's HMAC, all derived from the DEK with HMAC. The version byte is inside the MAC, so a blob cannot be relabelled as another cipher.
 * **Context binding**: the MAC includes a label such as `profile|user:7|field:nik`. A ciphertext copied into another field, record or user fails verification.
 * One generic `DecryptionError` for every failure, so an attacker learns nothing about why.
 
@@ -143,15 +153,34 @@ SHA-256, HMAC and PBKDF2 come from Python's standard library (`hashlib`, `hmac`)
 
 | Algorithm | Verdict | Used for |
 |---|---|---|
-| AES-256-CBC + HMAC-SHA256 | Modern construction (AES-GCM is the usual modern choice) | all stored data |
+| AES-256-CBC + HMAC-SHA256 | Modern construction (AES-GCM is the usual modern choice) | all stored data (primary copy) |
 | PBKDF2-HMAC-SHA256, 600k iterations | Acceptable (Argon2id preferred for new systems) | passwords, KEK |
 | SHA-256, HMAC-SHA256 | Modern | inside HMAC/PBKDF2 |
 | AES-ECB | Insecure mode | lab only |
-| DES | Broken (56-bit key) | lab only |
+| DES-CBC + HMAC | Broken (56-bit key) | second copy of all stored data (assignment requirement), lab |
 | 3DES | Deprecated (64-bit block, Sweet32) | not used |
-| RC4 | Broken (biased keystream, RFC 7465) | lab only |
+| RC4-drop1536 + HMAC | Broken (biased keystream, RFC 7465) | third copy of all stored data (assignment requirement), lab |
 
 **Why not use this AES in production?** Its output is correct, but: (1) table lookups indexed by secret bytes take different times depending on CPU cache state, the side channel exploited by Bernstein's 2005 cache-timing attack, and Python offers no way to make this constant-time; (2) Python cannot reliably erase keys from memory; (3) it is slow; (4) it has not been independently audited. Production code would use `cryptography`'s AES-GCM and `argon2-cffi`. Saying this clearly is part of a good security presentation, not a weakness of the project.
+
+### 4.7 Comparing the three ciphers (analysis.py, benchmark.py)
+
+The assignment asks to analyse the running time and the resulting ciphertext of each cipher, downloading the data several times.
+
+* **In the app**: the **Analysis** page (`/analysis`, after login) shows, per cipher, every recorded encryption (at upload) and decryption (each download or vault view), with mean, standard deviation, min, max and MB/s, overall and per file. "Run benchmark" decrypts a chosen file N times (1-10) with each cipher in turn. It also breaks each copy of a file into IV, ciphertext, padding and HMAC overhead, shows the first ciphertext bytes and their entropy, and lists the stored size of every profile field per cipher.
+* **From the command line**: `python benchmark.py [--runs N] [--file path]` prints the same comparison as Markdown tables on 1 KB / 100 KB / 1 MB of random data and 100 KB of repetitive text. The results used in the report are in `docs/benchmark-results.md`.
+
+Only the cryptography (cipher + HMAC) is timed with `time.perf_counter()`; disk and network time are the same for every cipher and would hide the difference. Summary of the measurements (Apple Silicon, Python 3.9):
+
+| | AES-256-CBC | DES-CBC | RC4-drop1536 |
+|---|---|---|---|
+| Speed (1 MB) | ~1.25 MB/s | ~0.70 MB/s (0.56x AES) | ~8 MB/s (6.3x AES) |
+| IV / nonce | 16 B | 8 B | 16 B |
+| Padding | 1-16 B | 1-8 B | none (length leaks exactly) |
+| Stored overhead (version + IV + padding + HMAC) | 50-65 B | 42-49 B | always 49 B |
+| Ciphertext entropy (100 KB text, plaintext 4.86) | 7.998 | 7.998 | 7.998 |
+
+Why: RC4 does one swap and one XOR per byte. DES does 16 rounds on 8-byte blocks, so twice as many block operations per byte as AES (14 rounds on 16-byte blocks), and its bit permutations are costly in software. With AES-NI hardware instructions real AES is usually the fastest of the three, so the ranking reflects this pure-Python implementation. All three ciphertexts look random (entropy ≈ 8 bits/byte even for very repetitive input) and differ completely from each other and between two encryptions of the same value (random IV/nonce). Speed is not security: only AES is acceptable.
 
 ## 5. Password hashing vs encryption
 
@@ -188,15 +217,14 @@ Every row has a test in `tests/test_app.py` that performs the attack.
 | Attack | Defence | Where |
 |---|---|---|
 | SQL injection | Every query uses `?` placeholders; SQL text and data are sent separately. No string-built SQL anywhere. | `db.py`, all `execute()` calls |
-| Brute-force login | Max 5 failures per username and 20 per IP in 15 minutes (HTTP 429); slow PBKDF2; same error message and timing for unknown users | `security/ratelimit.py`, `app.py login()` |
+| Brute-force login | Slow PBKDF2 (600k iterations) per guess; same error message and timing for unknown users. No lockout (see section 8) | `app.py login()` |
 | Session hijacking | 256-bit random session ID; `HttpOnly`, `SameSite=Strict`, `Secure` (with HTTPS); new ID at login and logout (anti-fixation); 15 min idle and 8 h absolute timeout; session data and DEK only in server memory | `security/sessions.py`, `app.py` |
 | CSRF | Per-session secret token in every form, checked with a constant-time compare on every POST, including login; plus `SameSite=Strict` | `app.py load_session()` |
-| XSS | Jinja2 auto-escaping of every value; CSP `script-src 'none'` (the app uses no JavaScript); messages chosen from a fixed list, never echoed from the URL | templates, `security/headers.py` |
-| Insecure uploads | Category-based extension allow-list; magic-byte / ZIP-structure check; MIME type from our table, not the client; size limit; stored encrypted under a random name; always downloaded as an attachment with `nosniff` | `security/uploads.py` |
+| XSS | Jinja2 auto-escaping of every value; the app uses no JavaScript; messages chosen from a fixed list, never echoed from the URL | templates |
+| Insecure uploads | Category-based extension allow-list; magic-byte / ZIP-structure check; MIME type from our table, not the client; size limit; stored encrypted under a random name; always downloaded as an attachment | `security/uploads.py` |
 | Path traversal | User filenames never touch the filesystem; file IDs must match `^[0-9a-f]{32}$`; resolved path must stay inside the storage folder | `app.py storage_path()` |
 | Unauthorized file access / other users' files (IDOR) | `WHERE id = ? AND user_id = ?` on every file operation; 404 instead of 403 so file IDs cannot be probed; per-user keys make other users' files undecryptable anyway | `app.py owned_file_or_404()` |
 | Tampering with stored data | HMAC verified before decryption; context binding blocks ciphertext swapping | `crypto/envelope.py` |
-| Clickjacking, caching of personal data | `frame-ancestors 'none'`, `X-Frame-Options: DENY`, `Cache-Control: no-store` | `security/headers.py` |
 
 ## 8. Known limitations (good material for the "future work" section)
 
@@ -205,14 +233,17 @@ Every row has a test in `tests/test_app.py` that performs the attack.
 * Behind a reverse proxy, `request.remote_addr` is the proxy's address; Werkzeug's `ProxyFix` would be needed for per-IP rate limiting.
 * The registration form reveals whether a username is taken; there is no account recovery and no password-change page (envelope encryption would make one easy to add).
 * Upload validation checks file structure but does not scan for macros or malware.
-* Account lockout can be abused to lock someone out temporarily.
+* There is no login rate limit or account lockout, and no security headers (CSP, HSTS, `nosniff`, `X-Frame-Options`, `Cache-Control: no-store`); both were left out to keep the project focused on the assignment and would be the first additions in production.
 * Python cannot guarantee keys are wiped from memory.
+* Keeping DES and RC4 copies (required by the assignment) adds weak ciphertexts next to the AES one. Each copy uses its own key derived from the DEK, so breaking the DES copy reveals that copy's data but not the DEK; still, a real system would store only the AES copy.
+* The timings table reveals each file's exact size and when it was downloaded.
 
 ## 9. Suggested demo order
 
 1. Register, log in, save a NIK, then open the SQLite file (e.g. with DB Browser for SQLite) to show only ciphertext.
-2. Upload a KTP image; show the random `.bin` name on disk and that the file is unreadable.
-3. Log in as a second user and request the first user's file URL: 404.
-4. Try `' OR '1'='1` as a username; enter a wrong password six times.
-5. Crypto Lab: the AES rounds for the FIPS-197 example, then the ECB padlock picture.
-6. Run `python -m unittest -v` and walk through the attack tests.
+2. Upload a KTP image; show the three random `.aes.bin` / `.des.bin` / `.rc4.bin` files on disk and that they are unreadable; download it from each copy.
+3. Open **Analysis**, run a 5-round benchmark and explain the timing and ciphertext tables.
+4. Log in as a second user and request the first user's file URL: 404.
+5. Try `' OR '1'='1` as a username; enter a wrong password six times.
+6. Crypto Lab: the AES rounds for the FIPS-197 example, then the ECB padlock picture.
+7. Run `python -m unittest -v` and walk through the attack tests.

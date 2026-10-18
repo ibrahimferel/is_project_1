@@ -1,0 +1,9 @@
+{% set ep = request.endpoint %}
+<nav class="lab-nav" aria-label="Crypto Lab">
+  <a href="{{ url_for('lab.index') }}"{% if ep == 'lab.index' %} aria-current="page"{% endif %}>Overview</a>
+  <a href="{{ url_for('lab.aes_lab') }}"{% if ep == 'lab.aes_lab' %} aria-current="page"{% endif %}>AES</a>
+  <a href="{{ url_for('lab.des_lab') }}"{% if ep == 'lab.des_lab' %} aria-current="page"{% endif %}>DES</a>
+  <a href="{{ url_for('lab.rc4_lab') }}"{% if ep == 'lab.rc4_lab' %} aria-current="page"{% endif %}>RC4</a>
+  <a href="{{ url_for('lab.modes_lab') }}"{% if ep == 'lab.modes_lab' %} aria-current="page"{% endif %}>ECB vs CBC</a>
+  <a href="{{ url_for('lab.hashing_lab') }}"{% if ep == 'lab.hashing_lab' %} aria-current="page"{% endif %}>Hashing</a>
+</nav>

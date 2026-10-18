@@ -163,6 +163,9 @@ class DES:
 
     def __init__(self, key: bytes):
         self.round_keys = key_schedule(key)
+        # Round keys split into 8 six-bit chunks for the fast path (below).
+        self._enc_chunks = [_key_chunks(k) for k in self.round_keys]
+        self._dec_chunks = self._enc_chunks[::-1]
 
     def _crypt(self, block: bytes, keys, trace):
         if len(block) != 8:
@@ -180,7 +183,67 @@ class DES:
         return out.to_bytes(8, "big")
 
     def encrypt_block(self, block: bytes, trace=None) -> bytes:
+        if trace is None:
+            return _fast_crypt(self._enc_chunks, block)
         return self._crypt(block, self.round_keys, trace)
 
     def decrypt_block(self, block: bytes, trace=None) -> bytes:
+        if trace is None:
+            return _fast_crypt(self._dec_chunks, block)
         return self._crypt(block, list(reversed(self.round_keys)), trace)
+
+
+# ---------------------------------------------------------------------------
+# Fast path (used when no trace is requested)
+# ---------------------------------------------------------------------------
+#
+# The bit-by-bit `permute` above is easy to check against the standard but
+# makes DES about 20x slower than our AES, far too slow to encrypt stored
+# files. Software DES (e.g. libdes / OpenSSL) uses the same tricks as here:
+#
+#   * IP and FP: one table per input byte, so a 64-bit permutation becomes
+#     8 lookups OR-ed together.
+#   * E: a 1-bit rotation of R lines up every 6-bit chunk of E(R), so the
+#     expansion is just shifts and masks.
+#   * S-box + P: SP[i][x] = P(S_i(x) placed at chunk i), so all 8 S-boxes and
+#     the P permutation become 8 lookups.
+#
+# Every table is COMPUTED from IP, FP, P and SBOXES above (no pasted
+# constants), and tests/test_crypto.py checks that both paths agree.
+
+def _byte_tables(table, in_bits):
+    return [[permute(v << (in_bits - 8 - 8 * p), table, in_bits) for v in range(256)]
+            for p in range(in_bits // 8)]
+
+
+_IP_T = _byte_tables(IP, 64)
+_FP_T = _byte_tables(FP, 64)
+_SP = [[permute(SBOXES[i][((x & 0x20) >> 4) | (x & 1)][(x >> 1) & 0x0F] << (28 - 4 * i), P, 32)
+        for x in range(64)] for i in range(8)]
+
+
+def _key_chunks(round_key):
+    return tuple((round_key >> (42 - 6 * i)) & 0x3F for i in range(8))
+
+
+def _permute64(tables, block):
+    out = 0
+    for t, byte in zip(tables, block):
+        out |= t[byte]
+    return out
+
+
+def _fast_crypt(key_chunks, block):
+    if len(block) != 8:
+        raise ValueError("DES block must be exactly 8 bytes")
+    sp0, sp1, sp2, sp3, sp4, sp5, sp6, sp7 = _SP
+    x = _permute64(_IP_T, block)
+    left, right = x >> 32, x & 0xFFFFFFFF
+    for k0, k1, k2, k3, k4, k5, k6, k7 in key_chunks:
+        r = ((right >> 1) | (right << 31)) & 0xFFFFFFFF     # bits 32,1,2,...,31
+        left, right = right, left ^ (
+            sp0[(r >> 26) ^ k0] | sp1[((r >> 22) & 63) ^ k1] |
+            sp2[((r >> 18) & 63) ^ k2] | sp3[((r >> 14) & 63) ^ k3] |
+            sp4[((r >> 10) & 63) ^ k4] | sp5[((r >> 6) & 63) ^ k5] |
+            sp6[((r >> 2) & 63) ^ k6] | sp7[(((r & 0xF) << 2) | (r >> 30)) ^ k7])
+    return _permute64(_FP_T, ((right << 32) | left).to_bytes(8, "big")).to_bytes(8, "big")

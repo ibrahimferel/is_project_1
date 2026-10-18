@@ -94,6 +94,14 @@ class TestDES(unittest.TestCase):
         ct = cbc_encrypt(des, pkcs7_pad(msg, 8), iv)
         self.assertEqual(pkcs7_unpad(cbc_decrypt(des, ct, iv), 8), msg)
 
+    def test_traced_and_fast_paths_agree(self):
+        for _ in range(200):
+            des, block = DES(os.urandom(8)), os.urandom(8)
+            ct = des.encrypt_block(block)
+            self.assertEqual(ct, des.encrypt_block(block, trace=[]))
+            self.assertEqual(des.decrypt_block(ct), block)
+            self.assertEqual(des.decrypt_block(ct, trace=[]), block)
+
 
 class TestRC4(unittest.TestCase):
     def test_known_answers(self):
@@ -104,6 +112,10 @@ class TestRC4(unittest.TestCase):
     def test_encrypt_equals_decrypt(self):
         ct = rc4_crypt(b"k", b"hello")
         self.assertEqual(rc4_crypt(b"k", ct), b"hello")
+
+    def test_drop_skips_keystream(self):
+        full = rc4_crypt(b"Key", bytes(20))
+        self.assertEqual(rc4_crypt(b"Key", bytes(8), drop=12), full[12:])
 
 
 class TestEnvelope(unittest.TestCase):
@@ -128,6 +140,38 @@ class TestEnvelope(unittest.TestCase):
             envelope.open_sealed(envelope.generate_key(), blob, b"profile|user:1|field:nik")
         with self.assertRaises(envelope.DecryptionError):   # cut-and-paste into another field
             envelope.open_sealed(k, blob, b"profile|user:1|field:phone")
+
+    def test_every_cipher_round_trips_and_detects_tampering(self):
+        k = envelope.generate_key()
+        for alg in envelope.ALGORITHMS:
+            for msg in [b"", b"x", b"exactly 16 bytes", os.urandom(1000)]:
+                blob = envelope.seal(k, msg, b"ctx", alg)
+                self.assertEqual(envelope.algorithm_of(blob), alg)
+                self.assertEqual(envelope.open_sealed(k, blob, b"ctx"), msg)
+            blob = bytearray(envelope.seal(k, b"pay 100", b"ctx", alg))
+            blob[20] ^= 1
+            with self.assertRaises(envelope.DecryptionError):
+                envelope.open_sealed(k, bytes(blob), b"ctx")
+
+    def test_ciphertext_sizes(self):
+        k, msg = envelope.generate_key(), b"3578012345678901"     # 16 bytes
+        sizes = {alg: len(envelope.seal(k, msg, b"c", alg)) for alg in envelope.ALGORITHMS}
+        # version + IV + ciphertext (+ a full padding block when aligned) + tag
+        self.assertEqual(sizes, {"aes": 1 + 16 + 32 + 32, "des": 1 + 8 + 24 + 32, "rc4": 1 + 16 + 16 + 32})
+
+    def test_rc4_never_reuses_a_keystream(self):
+        k = envelope.generate_key()
+        a = envelope.seal(k, bytes(32), b"c", "rc4")
+        b = envelope.seal(k, bytes(32), b"c", "rc4")
+        # Encrypting zeros reveals the keystream: it must differ every time.
+        self.assertNotEqual(a[17:49], b[17:49])
+
+    def test_cipher_cannot_be_swapped(self):
+        k = envelope.generate_key()
+        blob = bytearray(envelope.seal(k, b"secret", b"ctx", "rc4"))
+        blob[0] = 0x01                                  # claim it is AES
+        with self.assertRaises(envelope.DecryptionError):
+            envelope.open_sealed(k, bytes(blob), b"ctx")
 
     def test_key_wrapping(self):
         kek, dek = envelope.generate_key(), envelope.generate_key()

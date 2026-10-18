@@ -1,0 +1,13 @@
+<aside class="auth-aside tone-emerald">
+  <h2>How your data is protected</h2>
+  <p>Your password is checked against a salted PBKDF2 hash, then used to unlock the key that encrypts your data.
+  Without it, nobody can decrypt your files, including the server operator.</p>
+  <ol class="steps">
+    <li><span class="panel-icon">{% include "icons/fingerprint.svg" %}</span>
+      <div><strong>Password check</strong><span>Compared against a salted PBKDF2 hash, 600,000 iterations.</span></div></li>
+    <li><span class="panel-icon">{% include "icons/key.svg" %}</span>
+      <div><strong>Key unlock</strong><span>A second PBKDF2 run derives the key that unwraps your data key.</span></div></li>
+    <li><span class="panel-icon">{% include "icons/lock-key.svg" %}</span>
+      <div><strong>Encrypted storage</strong><span>Profile fields and files are sealed with AES, DES and RC4, each plus HMAC-SHA256.</span></div></li>
+  </ol>
+</aside>

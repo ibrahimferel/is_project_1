@@ -1,26 +1,31 @@
 {% extends "base.html" %}
 {% block title %}ECB vs CBC{% endblock %}
 {% block content %}
-<h1>ECB vs CBC</h1>
-<p class="lead">The same AES-128 key encrypts the same data in two modes. ECB encrypts each 16-byte block on its own,
-so identical blocks stay identical. CBC XORs each block with the previous ciphertext block (and the first with a random IV), so patterns disappear.</p>
-<p class="muted">Key for this page load: <code>{{ key }}</code>. IV: <code>{{ iv }}</code>. Reload to get new ones.</p>
-
-<h2>An image</h2>
-<p class="muted">Only the pixel bytes were encrypted; the image header was kept so the browser can still draw the result.</p>
-<div class="images">
-  <figure><img src="{{ images.plain }}" alt="Original picture of a padlock" width="256" height="256"><figcaption>Original</figcaption></figure>
-  <figure><img src="{{ images.ecb }}" alt="ECB-encrypted picture: the padlock outline is still visible" width="256" height="256"><figcaption>AES-ECB: the outline survives</figcaption></figure>
-  <figure><img src="{{ images.cbc }}" alt="CBC-encrypted picture: random noise" width="256" height="256"><figcaption>AES-CBC: noise</figcaption></figure>
+{% include "lab/_nav.html" %}
+<div class="page-head">
+  <h1>ECB vs CBC</h1>
+  <p class="lead">The same AES-128 key encrypts the same data in two modes. ECB encrypts each 16-byte block on its own,
+  so identical blocks stay identical. CBC XORs each block with the previous ciphertext block (and the first with a random IV), so patterns disappear.</p>
+  <p class="muted">Key for this page load: <code>{{ key }}</code>. IV: <code>{{ iv }}</code>. Reload to get new ones.</p>
 </div>
 
+<section class="panel">
+  <h2 class="table-title">An image</h2>
+  <p class="muted">Only the pixel bytes were encrypted; the image header was kept so the browser can still draw the result.</p>
+  <div class="images">
+    <figure><img src="{{ images.plain }}" alt="Original picture of a padlock" width="256" height="256"><figcaption>Original</figcaption></figure>
+    <figure><img src="{{ images.ecb }}" alt="ECB-encrypted picture: the padlock outline is still visible" width="256" height="256"><figcaption>AES-ECB: the outline survives</figcaption></figure>
+    <figure><img src="{{ images.cbc }}" alt="CBC-encrypted picture: random noise" width="256" height="256"><figcaption>AES-CBC: noise</figcaption></figure>
+  </div>
+</section>
+
 <h2>Structured text</h2>
-<form method="post" class="grid">
+<form method="post" class="panel lab-form">
   <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-  <label>Plaintext (try repeating a 16-character chunk)<textarea name="text" rows="2" maxlength="256" class="mono">{{ text }}</textarea></label>
-  <div><button type="submit">Encrypt</button></div>
+  <label class="field"><span>Plaintext (try repeating a 16-character chunk)</span><textarea name="text" rows="2" maxlength="256" class="mono" spellcheck="false">{{ text }}</textarea></label>
+  <div class="form-actions"><button type="submit">Encrypt</button></div>
 </form>
-<div class="scroll"><table class="mono small">
+<div class="panel table-panel scroll result"><table class="mono small">
   <thead><tr><th>Block</th><th>Plaintext</th><th>ECB ciphertext</th><th>CBC ciphertext</th></tr></thead>
   <tbody>{% for b in blocks %}
     <tr><td>{{ b.index }}</td><td>{{ b.plain }}</td><td class="{{ 'repeat' if b.repeated else '' }}">{{ b.ecb }}{% if b.repeated %} (repeated){% endif %}</td><td>{{ b.cbc }}</td></tr>

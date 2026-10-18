@@ -1,0 +1,143 @@
+{% extends "base.html" %}
+{% block title %}Cipher analysis{% endblock %}
+{% block content %}
+{% macro ms(v) %}{{ "%.2f"|format(v) }} ms{% endmacro %}
+{% macro speed(s) %}{% if s %}{{ "%.2f"|format(s.mb_per_s) }} MB/s{% else %}<span class="muted">no data</span>{% endif %}{% endmacro %}
+{% set names = {} %}{% for f in files %}{% set _ = names.update({f.id: f.name}) %}{% endfor %}
+{% set _ = names.update({"profile": "Personal data (all fields)"}) %}
+
+<div class="page-head">
+  <h1>AES vs DES vs RC4</h1>
+  <p class="lead">Everything in your vault is stored three times, once per cipher. This page compares the copies:
+  how long each cipher takes to encrypt and decrypt your data, and what the resulting ciphertexts look like.
+  Only the cryptography is timed (cipher + HMAC), not disk or network.</p>
+</div>
+{% if message %}<p class="notice ok">{% include "icons/check-circle.svg" %}<span>{{ message }}</span></p>{% endif %}
+
+<section class="panel" aria-labelledby="run-heading">
+  <div class="panel-head">
+    <span class="panel-icon tone-amber">{% include "icons/download-simple.svg" %}</span>
+    <div>
+      <h2 id="run-heading">Download the data multiple times</h2>
+      <p>Each round decrypts the file once with every cipher, taking turns (AES, DES, RC4, AES, ...) so a busy moment on the server slows all three equally.
+      Ordinary downloads from <a href="{{ url_for('dashboard') }}">My vault</a> are timed too.</p>
+    </div>
+  </div>
+  {% if files %}
+  <form method="post" action="{{ url_for('run_benchmark') }}" class="upload-row">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label class="field"><span>File</span>
+      <select name="file_id">
+        {% for f in files %}<option value="{{ f.id }}"{% if selected and f.id == selected.id %} selected{% endif %}>{{ f.name }} ({{ "%.1f"|format(f.size / 1024) }} KB)</option>{% endfor %}
+      </select>
+    </label>
+    <label class="field"><span>Rounds</span><input type="number" name="rounds" min="1" max="{{ max_rounds }}" value="5"></label>
+    <button type="submit">Run benchmark</button>
+  </form>
+  <p class="hint">A 1 MB file takes about 3 seconds per round; a 20 MB video about a minute.</p>
+  {% else %}
+  <p class="muted">Upload a file in <a href="{{ url_for('dashboard') }}">My vault</a> first.</p>
+  {% endif %}
+</section>
+
+<h2>1. Running time</h2>
+<p class="muted">Speed over all measurements so far (total bytes / total time). "vs AES" above 1 means faster than AES.</p>
+<div class="panel table-panel scroll">
+<table>
+  <thead><tr><th>Cipher</th><th>Encryptions</th><th>Encrypt speed</th><th>Decryptions</th><th>Decrypt speed</th><th>Decrypt vs AES</th></tr></thead>
+  <tbody>
+  {% for a in algorithms %}{% set e = overall.encrypt[a] %}{% set d = overall.decrypt[a] %}
+    <tr>
+      <td>{{ alg_labels[a] }}</td>
+      <td class="num">{{ e.runs if e else 0 }}</td>
+      <td class="num">{{ speed(e) }}</td>
+      <td class="num">{{ d.runs if d else 0 }}</td>
+      <td class="num">{{ speed(d) }}</td>
+      <td class="num">{% if d and d.vs_aes is defined %}{{ "%.2f"|format(d.vs_aes) }}x{% else %}-{% endif %}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+
+{% for item, ops in per_item.items() if item in names %}
+<h3 class="item-heading">{{ names[item] }}</h3>
+<div class="panel table-panel scroll">
+<table class="small">
+  <thead><tr><th>Cipher</th><th>Encrypt</th><th>Decryptions</th><th>Mean</th><th>Std dev</th><th>Min</th><th>Max</th><th>Speed</th></tr></thead>
+  <tbody>
+  {% for a in algorithms %}{% set e = ops.encrypt[a] %}{% set d = ops.decrypt[a] %}
+    <tr>
+      <td>{{ alg_labels[a] }}</td>
+      <td class="num">{{ ms(e.mean_ms) if e else "-" }}</td>
+      <td class="num">{{ d.runs if d else 0 }}</td>
+      {% if d %}
+      <td class="num">{{ ms(d.mean_ms) }}</td><td class="num">{{ ms(d.stdev_ms) }}</td>
+      <td class="num">{{ ms(d.min_ms) }}</td><td class="num">{{ ms(d.max_ms) }}</td><td class="num">{{ speed(d) }}</td>
+      {% else %}<td class="num" colspan="5">-</td>{% endif %}
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endfor %}
+
+<h2>2. Resulting ciphertext</h2>
+{% if selected %}
+<p class="muted">The same plaintext, <strong>{{ selected.name }}</strong> ({{ selected.size }} bytes), as stored by each cipher.
+{% if files|length > 1 %}Other files:
+  {% for f in files if f.id != selected.id %}<a href="{{ url_for('analysis_page', file=f.id) }}">{{ f.name }}</a>{% if not loop.last %}, {% endif %}{% endfor %}{% endif %}</p>
+<div class="panel table-panel scroll">
+<table class="small">
+  <thead><tr><th>Cipher</th><th>Stored</th><th>IV / nonce</th><th>Ciphertext</th><th>Padding</th><th>Overhead</th><th>Entropy</th><th>First ciphertext bytes</th></tr></thead>
+  <tbody>
+  {% for b in blobs %}
+    <tr>
+      <td>{{ b.label }}</td>
+      <td class="num">{{ b.stored }} B</td>
+      <td class="num">{{ b.iv_len }} B</td>
+      <td class="num">{{ b.ct_len }} B</td>
+      <td class="num">{{ b.padding }} B</td>
+      <td class="num">{{ b.overhead }} B</td>
+      <td class="num">{{ "%.4f"|format(b.entropy) }}{% if b.sampled %}*{% endif %}</td>
+      <td><code class="wrap">{{ b.ct_head }}</code></td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+<p class="hint">Stored = 1 version byte + IV/nonce + ciphertext + 32-byte HMAC tag. Entropy is in bits per byte; 8 is the maximum (random-looking).
+{% if blobs|selectattr("sampled")|list %}* measured on the first 1 MB.{% endif %}</p>
+{% else %}
+<p class="muted">Upload a file to compare its ciphertexts.</p>
+{% endif %}
+
+{% if profile_sizes %}
+<h3 class="item-heading">Personal data: stored size per field</h3>
+<div class="panel table-panel scroll">
+<table class="small">
+  <thead><tr><th>Field</th><th>AES</th><th>DES</th><th>RC4</th></tr></thead>
+  <tbody>
+  {% for r in profile_sizes %}
+    <tr><td>{{ r.label }}</td>
+      {% for a in algorithms %}<td class="num">{{ r[a] ~ " B" if r[a] else "-" }}</td>{% endfor %}</tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+<p class="hint">RC4 adds no padding, so its size reveals the exact length of the value (e.g. a 16-digit NIK). AES rounds up to 16 bytes, DES to 8.</p>
+{% endif %}
+
+<h2>3. How to read the results</h2>
+<div class="panel prose">
+<ul>
+  <li><strong>Speed.</strong> In this pure-Python code RC4 is fastest (one swap and one XOR per byte), then AES, then DES.
+  DES is slowest even though its key is shorter: it runs 16 rounds on 8-byte blocks, so it needs twice as many block operations as AES per byte, and its bit permutations are expensive in software.
+  With hardware AES instructions (AES-NI, found in modern CPUs) AES is usually the fastest of the three, so this ranking is a property of the implementation, not only of the ciphers.</li>
+  <li><strong>Size.</strong> AES and DES are block ciphers in CBC mode: PKCS#7 padding adds 1-16 bytes (AES) or 1-8 bytes (DES). RC4 is a stream cipher, so its ciphertext is exactly as long as the plaintext.
+  The IV is 16 bytes for AES, 8 for DES (one block); RC4 uses a 16-byte nonce to get a fresh key per message.</li>
+  <li><strong>Content.</strong> The three ciphertexts of the same file share no visible pattern, and all have an entropy close to 8 bits per byte, so they look like random data. Encrypting the same file again would give different ciphertexts again, because the IV/nonce is random.</li>
+  <li><strong>Security, which timing does not show.</strong> Only AES is a secure choice: DES has a 56-bit key that can be brute-forced, and RC4 has biased output and is banned from TLS (RFC 7465). The app reads your data from the AES copy; the other copies exist for this comparison.</li>
+</ul>
+</div>
+{% endblock %}

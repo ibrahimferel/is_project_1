@@ -57,7 +57,12 @@ def keystream(key: bytes, length: int) -> bytes:
     return prga(ksa(key), length)
 
 
-def rc4_crypt(key: bytes, data: bytes) -> bytes:
-    """Encrypt or decrypt (they are the same operation)."""
-    ks = keystream(key, len(data))
-    return bytes(d ^ k for d, k in zip(data, ks))
+def rc4_crypt(key: bytes, data: bytes, drop: int = 0) -> bytes:
+    """Encrypt or decrypt (they are the same operation).
+
+    `drop` discards that many keystream bytes first ("RC4-drop[n]"), because
+    the first bytes are the most biased. The lab uses drop=0 to match the
+    published test vectors; stored data uses drop=1536 (RFC 4345).
+    """
+    ks = keystream(key, drop + len(data))[drop:]
+    return (int.from_bytes(data, "big") ^ int.from_bytes(ks, "big")).to_bytes(len(data), "big")

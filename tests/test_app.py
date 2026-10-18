@@ -64,7 +64,7 @@ class BaseCase(unittest.TestCase):
             "file": (io.BytesIO(data), name)})
 
     def file_ids(self, client):
-        return re.findall(r"/files/([0-9a-f]{32})\"", client.get("/dashboard").get_data(as_text=True))
+        return re.findall(r"/files/([0-9a-f]{32})\?alg=aes\"", client.get("/dashboard").get_data(as_text=True))
 
     def raw_db(self):
         conn = sqlite3.connect(self.app.config["DATABASE"])
@@ -108,13 +108,6 @@ class AppTest(BaseCase):
         c.post("/profile", data={"csrf_token": self.token(c, "/dashboard"), "full_name": name})
         self.assertIn("O&#39;Brien", c.get("/dashboard").get_data(as_text=True))
 
-    # ---- brute force
-    def test_lockout_after_repeated_failures(self):
-        self.register("alice")
-        for _ in range(5):
-            self.assertEqual(self.login("alice", "wrong password!!").status_code, 401)
-        self.assertEqual(self.login("alice").status_code, 429)   # even the right password
-
     # ---- CSRF
     def test_post_without_or_with_wrong_csrf_token_is_rejected(self):
         c = self.user("alice")
@@ -144,7 +137,7 @@ class AppTest(BaseCase):
         self.assertEqual(attacker.get("/dashboard").status_code, 302)
 
     # ---- XSS
-    def test_stored_xss_is_escaped_and_csp_is_set(self):
+    def test_stored_xss_is_escaped(self):
         c = self.user("alice")
         c.post("/profile", data={"csrf_token": self.token(c, "/dashboard"),
                                  "full_name": "<script>alert(1)</script>"})
@@ -152,39 +145,71 @@ class AppTest(BaseCase):
         html = r.get_data(as_text=True)
         self.assertNotIn("<script>alert(1)</script>", html)
         self.assertIn("&lt;script&gt;", html)
-        self.assertIn("script-src 'none'", r.headers["Content-Security-Policy"])
 
     # ---- data at rest
     def test_personal_data_is_encrypted_in_database(self):
         c = self.user("alice")
         c.post("/profile", data={"csrf_token": self.token(c, "/dashboard"), "nik": "3578012345678901"})
-        self.assertIn("3578012345678901", c.get("/dashboard").get_data(as_text=True))
+        for alg in ("aes", "des", "rc4"):        # each cipher's copy decrypts to the same value
+            self.assertIn("3578012345678901", c.get(f"/dashboard?alg={alg}").get_data(as_text=True))
         self.assertNotIn("3578012345678901", self.raw_db())
+        conn = sqlite3.connect(self.app.config["DATABASE"])
+        row = conn.execute("SELECT ciphertext, ciphertext_des, ciphertext_rc4 FROM profile_fields").fetchone()
+        conn.close()
+        self.assertEqual([b[0] for b in row], [1, 2, 3])          # version byte: AES, DES, RC4
+
+    # ---- cipher comparison
+    def test_benchmark_records_timings_for_every_cipher(self):
+        c = self.user("alice")
+        self.upload(c, "ktp.png", PNG)
+        file_id = self.file_ids(c)[0]
+        r = c.post("/analysis/run", data={"csrf_token": self.token(c, "/dashboard"),
+                                          "file_id": file_id, "rounds": "3"})
+        self.assertEqual(r.status_code, 302)
+        conn = sqlite3.connect(self.app.config["DATABASE"])
+        counts = dict(conn.execute("SELECT alg || ':' || op, count(*) FROM timings "
+                                   "WHERE item = ? GROUP BY alg, op", (file_id,)).fetchall())
+        conn.close()
+        self.assertEqual(counts, {"aes:encrypt": 1, "des:encrypt": 1, "rc4:encrypt": 1,
+                                  "aes:decrypt": 3, "des:decrypt": 3, "rc4:decrypt": 3})
+        page = c.get(f"/analysis?file={file_id}").get_data(as_text=True)
+        for label in ("AES-256-CBC", "DES-CBC", "RC4-drop1536", "ktp.png"):
+            self.assertIn(label, page)
+        self.assertNotIn("PRIVATE-PIXELS", page)
+        self.assertEqual(self.app.test_client().get("/analysis").status_code, 302)   # login required
 
     def test_file_is_encrypted_on_disk_and_decrypted_on_download(self):
         c = self.user("alice")
         self.assertEqual(self.upload(c, "ktp.png", PNG).status_code, 302)
         file_id = self.file_ids(c)[0]
-        stored = os.listdir(self.app.config["STORAGE_DIR"])
-        self.assertEqual(stored, [file_id + ".bin"])            # random name, not ktp.png
-        with open(os.path.join(self.app.config["STORAGE_DIR"], stored[0]), "rb") as fh:
-            self.assertNotIn(b"PRIVATE-PIXELS", fh.read())
+        stored = sorted(os.listdir(self.app.config["STORAGE_DIR"]))
+        # random name (not ktp.png), one encrypted copy per cipher
+        self.assertEqual(stored, [f"{file_id}.{alg}.bin" for alg in ("aes", "des", "rc4")])
+        copies = []
+        for name in stored:
+            with open(os.path.join(self.app.config["STORAGE_DIR"], name), "rb") as fh:
+                copies.append(fh.read())
+            self.assertNotIn(b"PRIVATE-PIXELS", copies[-1])
+        self.assertEqual(len(set(copies)), 3)                    # three different ciphertexts
         self.assertNotIn("ktp.png", self.raw_db())               # filename encrypted too
-        r = c.get(f"/files/{file_id}")
-        self.assertEqual(r.data, PNG)
-        self.assertIn("attachment", r.headers["Content-Disposition"])
+        for alg in ("aes", "des", "rc4"):                        # every copy decrypts on its own
+            r = c.get(f"/files/{file_id}?alg={alg}")
+            self.assertEqual(r.data, PNG, alg)
+            self.assertIn("attachment", r.headers["Content-Disposition"])
+        self.assertEqual(c.get(f"/files/{file_id}?alg=rot13").status_code, 404)
 
     def test_tampered_file_is_refused(self):
         c = self.user("alice")
         self.upload(c, "ktp.png", PNG)
         file_id = self.file_ids(c)[0]
-        path = os.path.join(self.app.config["STORAGE_DIR"], file_id + ".bin")
-        with open(path, "rb") as fh:
-            data = bytearray(fh.read())
-        data[40] ^= 0xFF                                   # attacker edits the stored file
-        with open(path, "wb") as fh:
-            fh.write(bytes(data))
-        self.assertEqual(c.get(f"/files/{file_id}").status_code, 500)
+        for alg in ("aes", "des", "rc4"):
+            path = os.path.join(self.app.config["STORAGE_DIR"], f"{file_id}.{alg}.bin")
+            with open(path, "rb") as fh:
+                data = bytearray(fh.read())
+            data[40] ^= 0xFF                               # attacker edits the stored file
+            with open(path, "wb") as fh:
+                fh.write(bytes(data))
+            self.assertEqual(c.get(f"/files/{file_id}?alg={alg}").status_code, 500, alg)
 
     # ---- insecure uploads
     def test_dangerous_or_disguised_uploads_are_rejected(self):
@@ -214,7 +239,7 @@ class AppTest(BaseCase):
             self.assertEqual(c.get(path).status_code, 404, path)
         # A traversal filename is only ever used as a display name.
         self.upload(c, "../../../../etc/passwd.png", PNG)
-        self.assertTrue(all(re.fullmatch(r"[0-9a-f]{32}\.bin", n)
+        self.assertTrue(all(re.fullmatch(r"[0-9a-f]{32}\.(aes|des|rc4)\.bin", n)
                             for n in os.listdir(self.app.config["STORAGE_DIR"])))
 
     # ---- access control between users (IDOR)
@@ -226,12 +251,9 @@ class AppTest(BaseCase):
         r = bob.post(f"/files/{file_id}/delete", data={"csrf_token": self.token(bob, "/dashboard")})
         self.assertEqual(r.status_code, 404)
         self.assertEqual(alice.get(f"/files/{file_id}").status_code, 200)   # still there
-
-    def test_security_headers(self):
-        h = self.client.get("/login").headers
-        self.assertEqual(h["X-Content-Type-Options"], "nosniff")
-        self.assertEqual(h["X-Frame-Options"], "DENY")
-        self.assertEqual(h["Cache-Control"], "no-store")
+        r = bob.post("/analysis/run", data={"csrf_token": self.token(bob, "/dashboard"),
+                                            "file_id": file_id, "rounds": "1"})
+        self.assertEqual(r.status_code, 404)
 
 
 class LabTest(BaseCase):

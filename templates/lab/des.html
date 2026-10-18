@@ -1,39 +1,44 @@
 {% extends "base.html" %}
 {% block title %}DES step by step{% endblock %}
 {% block content %}
-<h1>DES step by step</h1>
-<p class="notice warn">Educational only. DES's 56-bit key can be brute-forced; it is never used to store data in this app.</p>
-<p class="lead">DES is a Feistel network: each round computes L<sub>i</sub> = R<sub>i-1</sub> and R<sub>i</sub> = L<sub>i-1</sub> XOR f(R<sub>i-1</sub>, K<sub>i</sub>).
-Decryption is the same procedure with the round keys reversed. The default key and block give the textbook result <code>85e813540f0ab405</code>.</p>
-<form method="post" class="stack">
+{% include "lab/_nav.html" %}
+<div class="page-head">
+  <h1>DES step by step</h1>
+  <p class="notice warn">{% include "icons/warning.svg" %}<span>Educational only. DES's 56-bit key can be brute-forced; the app stores a DES copy only because the assignment requires it, and reads data from the AES copy.</span></p>
+  <p class="lead">DES is a Feistel network: each round computes L<sub>i</sub> = R<sub>i-1</sub> and R<sub>i</sub> = L<sub>i-1</sub> XOR f(R<sub>i-1</sub>, K<sub>i</sub>).
+  Decryption is the same procedure with the round keys reversed. The default key and block give the textbook result <code>85e813540f0ab405</code>.</p>
+</div>
+<form method="post" class="panel lab-form">
   <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-  <label>Key (16 hex digits)<input name="key" value="{{ key_hex }}" class="mono"></label>
-  <label>Plaintext block (16 hex digits)<input name="plaintext" value="{{ pt_hex }}" class="mono"></label>
-  <div><button type="submit">Encrypt and decrypt</button></div>
+  <label class="field"><span>Key (16 hex digits)</span><input name="key" value="{{ key_hex }}" class="mono" spellcheck="false"></label>
+  <label class="field"><span>Plaintext block (16 hex digits)</span><input name="plaintext" value="{{ pt_hex }}" class="mono" spellcheck="false"></label>
+  <div class="form-actions"><button type="submit">Encrypt and decrypt</button></div>
 </form>
-{% if error %}<p class="notice bad">{{ error }}</p>{% endif %}
+{% if error %}<p class="notice bad result">{% include "icons/warning.svg" %}<span>{{ error }}</span></p>{% endif %}
 {% if result %}
-<p class="notice ok">Ciphertext <code>{{ result.ct }}</code>, decrypted back to <code>{{ result.back }}</code>.</p>
+<div class="result">
+<p class="notice ok">{% include "icons/check-circle.svg" %}<span>Ciphertext <code>{{ result.ct }}</code>, decrypted back to <code>{{ result.back }}</code>.</span></p>
 <div class="two">
-  <div>
-    <h2>Encryption rounds</h2>
+  <section class="panel table-panel">
+    <h2 class="table-title">Encryption rounds</h2>
     <div class="scroll"><table class="mono small">
       <thead><tr><th>Round</th><th>Subkey K<sub>i</sub> (48 bit)</th><th>L</th><th>R</th></tr></thead>
       <tbody>{% for t in result.enc_trace %}
         <tr><td>{{ t.round if t.round else "after IP" }}</td><td>{{ t.key | hex48 if t.key is not none else "" }}</td><td>{{ t.L | hex32 }}</td><td>{{ t.R | hex32 }}</td></tr>
       {% endfor %}</tbody>
     </table></div>
-  </div>
-  <div>
-    <h2>Decryption rounds</h2>
+  </section>
+  <section class="panel table-panel">
+    <h2 class="table-title">Decryption rounds</h2>
     <div class="scroll"><table class="mono small">
       <thead><tr><th>Round</th><th>Subkey used</th><th>L</th><th>R</th></tr></thead>
       <tbody>{% for t in result.dec_trace %}
         <tr><td>{{ t.round if t.round else "after IP" }}</td><td>{{ t.key | hex48 if t.key is not none else "" }}</td><td>{{ t.L | hex32 }}</td><td>{{ t.R | hex32 }}</td></tr>
       {% endfor %}</tbody>
     </table></div>
-  </div>
+  </section>
 </div>
 <p class="muted">Notice that decryption uses K16 first and K1 last. After round 16 the halves are swapped once more and the final permutation (the inverse of IP) is applied.</p>
+</div>
 {% endif %}
 {% endblock %}

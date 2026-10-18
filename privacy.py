@@ -32,7 +32,8 @@ Interesting difference for your presentation: religion is a SPECIAL category
 under GDPR Art. 9 but a GENERAL category under UU PDP Pasal 4(3). This app
 treats it as sensitive and encrypts it either way.
 
-Design decision: every field below is encrypted with the user's own key.
+Design decision: every field below is encrypted with the user's own key,
+once with each cipher (AES, DES and RC4), as the assignment requires.
 Classification is still important because it tells you what MUST be
 protected, what needs extra care (consent, minimisation), and what to report
 if a breach happens.
@@ -41,7 +42,11 @@ if a breach happens.
 import re
 from datetime import date
 
+import analysis
 from crypto import envelope
+
+# Column holding each cipher's copy of a field (constants, safe to put in SQL).
+COLUMNS = {"aes": "ciphertext", "des": "ciphertext_des", "rc4": "ciphertext_rc4"}
 
 # Each field: key, label, HTML input type, max length, and its classification.
 FIELDS = [
@@ -120,7 +125,10 @@ NOT_ENCRYPTED = [
     ("Password", "Not encrypted at all: only a salted PBKDF2 hash is stored."),
     ("File ID, owner ID, upload timestamp", "Needed for access control and listing. "
                                             "The file's name, type and size are encrypted."),
-    ("Encrypted file size on disk", "Ciphertext length reveals the approximate file size."),
+    ("Encrypted file size on disk", "Ciphertext length reveals the approximate file size "
+                                    "(exactly, for RC4, which adds no padding)."),
+    ("Timing measurements", "For the cipher comparison the app records how long each encryption "
+                            "and decryption took and the size of the data, never its content."),
 ]
 
 _NIK_RE = re.compile(r"^\d{16}$")
@@ -156,27 +164,50 @@ def field_context(user_id: int, key: str) -> bytes:
     return f"profile|user:{user_id}|field:{key}".encode()
 
 
-def load_profile(conn, user_id: int, dek: bytes):
-    rows = conn.execute("SELECT field, ciphertext FROM profile_fields WHERE user_id = ?",
-                        (user_id,)).fetchall()
-    profile = {}
+def load_profile(conn, user_id: int, dek: bytes, alg: str = "aes"):
+    """Decrypt the profile from one cipher's copy, timing the decryption."""
+    rows = conn.execute(f"SELECT field, {COLUMNS[alg]} AS blob FROM profile_fields "
+                        "WHERE user_id = ?", (user_id,)).fetchall()
+    profile, nbytes, seconds = {}, 0, 0.0
     for row in rows:
         if row["field"] in FIELD_KEYS:
-            plain = envelope.open_sealed(dek, row["ciphertext"], field_context(user_id, row["field"]))
+            plain, spent = analysis.open_timed(dek, row["blob"], field_context(user_id, row["field"]))
             profile[row["field"]] = plain.decode("utf-8")
+            nbytes, seconds = nbytes + len(plain), seconds + spent
+    if profile:
+        analysis.record(conn, user_id, "profile", alg, "decrypt", nbytes, seconds)
     return profile
 
 
+def stored_sizes(conn, user_id: int):
+    """Plaintext-free view for the analysis page: ciphertext size per field and cipher."""
+    rows = conn.execute("SELECT field, length(ciphertext) AS aes, length(ciphertext_des) AS des, "
+                        "length(ciphertext_rc4) AS rc4 FROM profile_fields WHERE user_id = ?",
+                        (user_id,)).fetchall()
+    labels = {f["key"]: f["label"] for f in FIELDS}
+    return [dict(row, label=labels.get(row["field"], row["field"])) for row in rows]
+
+
 def save_profile(conn, user_id: int, dek: bytes, values, now: float):
+    nbytes, seconds = 0, dict.fromkeys(envelope.ALGORITHMS, 0.0)
     for key, value in values.items():
         if value:
-            blob = envelope.seal(dek, value.encode("utf-8"), field_context(user_id, key))
+            data = value.encode("utf-8")
+            blobs, spent = analysis.seal_all_timed(dek, data, field_context(user_id, key))
+            nbytes += len(data)
+            for alg in seconds:
+                seconds[alg] += spent[alg]
             conn.execute(
-                "INSERT INTO profile_fields (user_id, field, ciphertext, updated_at) VALUES (?, ?, ?, ?) "
+                "INSERT INTO profile_fields (user_id, field, ciphertext, ciphertext_des, ciphertext_rc4, "
+                "updated_at) VALUES (?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(user_id, field) DO UPDATE SET ciphertext = excluded.ciphertext, "
+                "ciphertext_des = excluded.ciphertext_des, ciphertext_rc4 = excluded.ciphertext_rc4, "
                 "updated_at = excluded.updated_at",
-                (user_id, key, blob, now),
+                (user_id, key, blobs["aes"], blobs["des"], blobs["rc4"], now),
             )
         else:
             conn.execute("DELETE FROM profile_fields WHERE user_id = ? AND field = ?", (user_id, key))
     conn.commit()
+    if nbytes:
+        for alg, spent in seconds.items():
+            analysis.record(conn, user_id, "profile", alg, "encrypt", nbytes, spent)

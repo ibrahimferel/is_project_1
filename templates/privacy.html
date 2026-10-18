@@ -1,19 +1,28 @@
 {% extends "base.html" %}
 {% block title %}Privacy{% endblock %}
 {% block content %}
-<h1>What data is protected, and why</h1>
-<p class="lead">This app stores data that counts as personal data under the EU's GDPR and Indonesia's
-UU No. 27 Tahun 2022 tentang Pelindungan Data Pribadi (UU PDP). Both laws require the controller to keep it secure
-(GDPR Art. 32, UU PDP Pasal 35). Encryption also matters after a breach: under GDPR Art. 34(3)(a),
-data that was encrypted and unintelligible to the attacker need not be individually notified.</p>
+<section class="banner tone-violet">
+  <div>
+  <h1>What data is protected, and why</h1>
+  <p>This app stores data that counts as personal data under the EU's GDPR and Indonesia's
+  UU No. 27 Tahun 2022 tentang Pelindungan Data Pribadi (UU PDP). Both laws require the controller to keep it secure
+  (GDPR Art. 32, UU PDP Pasal 35). Encryption also matters after a breach: under GDPR Art. 34(3)(a),
+  data that was encrypted and unintelligible to the attacker need not be individually notified.</p>
+  </div>
+</section>
 
 <h2>Profile fields</h2>
-<div class="scroll">
-<table>
+<div class="panel table-panel scroll">
+<table class="legal">
   <thead><tr><th>Field</th><th>GDPR</th><th>UU PDP</th><th>Risk if leaked</th></tr></thead>
   <tbody>
   {% for f in fields %}
-    <tr><td>{{ f.label }}</td><td>{{ f.gdpr }}</td><td>{{ f.uupdp }}</td><td>{{ f.why }}</td></tr>
+    <tr>
+      <td>{{ f.label }}</td>
+      <td>{{ f.gdpr }}{% if f.gdpr.startswith("SPECIAL") %}<br><span class="tag bad">Special category</span>{% endif %}</td>
+      <td>{{ f.uupdp }}{% if f.uupdp.startswith("SPESIFIK") %}<br><span class="tag bad">Spesifik</span>{% endif %}</td>
+      <td class="muted">{{ f.why }}</td>
+    </tr>
   {% endfor %}
   </tbody>
 </table>
@@ -21,25 +30,20 @@ data that was encrypted and unintelligible to the attacker need not be individua
 <p class="muted">Religion shows how the two laws differ: GDPR lists it as a special category (Art. 9),
 UU PDP lists agama as general personal data (Pasal 4(3)(d)). The app encrypts it either way.</p>
 
-<h2>Uploaded files</h2>
-<div class="scroll">
-<table>
-  <thead><tr><th>File type</th><th>Why it is sensitive</th></tr></thead>
-  <tbody>
-  {% for name, why in file_classes %}<tr><td>{{ name }}</td><td>{{ why }}</td></tr>{% endfor %}
-  </tbody>
-</table>
-</div>
-
-<h2>What is not encrypted</h2>
-<p>Being honest about the limits is part of the design.</p>
-<div class="scroll">
-<table>
-  <thead><tr><th>Data</th><th>Reason</th></tr></thead>
-  <tbody>
-  {% for name, why in not_encrypted %}<tr><td>{{ name }}</td><td>{{ why }}</td></tr>{% endfor %}
-  </tbody>
-</table>
+<div class="two">
+  <section class="panel">
+    <h2>Uploaded files</h2>
+    <dl class="kv">
+      {% for name, why in file_classes %}<div><dt>{{ name }}</dt><dd>{{ why }}</dd></div>{% endfor %}
+    </dl>
+  </section>
+  <section class="panel">
+    <h2>What is not encrypted</h2>
+    <p class="muted">Being honest about the limits is part of the design.</p>
+    <dl class="kv">
+      {% for name, why in not_encrypted %}<div><dt>{{ name }}</dt><dd>{{ why }}</dd></div>{% endfor %}
+    </dl>
+  </section>
 </div>
 <p class="muted">Summary for an educational project, not legal advice.</p>
 {% endblock %}

@@ -10,7 +10,9 @@ The database receives the SQL text and the data separately, so input such as
     ' OR '1'='1
 is treated as a literal string to compare, never as SQL code. Building SQL
 with f-strings or + would let that input change the query. There is no
-string-built SQL anywhere in the code (search for "execute(" to check).
+string-built SQL with user input anywhere in the code (search for "execute("
+to check). The only f-string inserts a column name taken from a constant in
+privacy.py, never from a request.
 """
 
 import os
@@ -32,7 +34,9 @@ CREATE TABLE IF NOT EXISTS users (
 CREATE TABLE IF NOT EXISTS profile_fields (
     user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     field       TEXT    NOT NULL,          -- e.g. 'nik' (the name is not secret)
-    ciphertext  BLOB    NOT NULL,          -- the value is always encrypted
+    ciphertext  BLOB    NOT NULL,          -- the value, sealed with AES (primary copy)
+    ciphertext_des BLOB NOT NULL,          -- the same value sealed with DES
+    ciphertext_rc4 BLOB NOT NULL,          -- the same value sealed with RC4
     updated_at  REAL    NOT NULL,
     PRIMARY KEY (user_id, field)
 );
@@ -40,16 +44,24 @@ CREATE TABLE IF NOT EXISTS profile_fields (
 CREATE TABLE IF NOT EXISTS files (
     id               TEXT    PRIMARY KEY,  -- random 128-bit hex, also the file name on disk
     user_id          INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    meta_ciphertext  BLOB    NOT NULL,     -- encrypted JSON: original name, type, size
+    meta_ciphertext  BLOB    NOT NULL,     -- encrypted JSON: original name, type, size (AES)
+    meta_des         BLOB    NOT NULL,     -- the same JSON sealed with DES
+    meta_rc4         BLOB    NOT NULL,     -- the same JSON sealed with RC4
     created_at       REAL    NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_files_user ON files(user_id);
 
-CREATE TABLE IF NOT EXISTS login_failures (
-    key  TEXT NOT NULL,                    -- 'user:<name>' or 'ip:<address>'
-    ts   REAL NOT NULL
+-- Running time of every encryption and decryption, for the cipher comparison.
+CREATE TABLE IF NOT EXISTS timings (
+    user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    item        TEXT    NOT NULL,          -- file ID, or 'profile'
+    alg         TEXT    NOT NULL,          -- 'aes', 'des' or 'rc4'
+    op          TEXT    NOT NULL,          -- 'encrypt' or 'decrypt'
+    bytes       INTEGER NOT NULL,          -- plaintext size
+    seconds     REAL    NOT NULL,
+    created_at  REAL    NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_failures_key ON login_failures(key, ts);
+CREATE INDEX IF NOT EXISTS idx_timings_user ON timings(user_id, item);
 """
 
 

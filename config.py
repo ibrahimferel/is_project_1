@@ -18,7 +18,7 @@ class Config:
     MAX_CONTENT_LENGTH = int(os.environ.get("SV_MAX_UPLOAD_MB", "20")) * 1024 * 1024
 
     # Set SV_HTTPS=1 when the app runs behind HTTPS. It enables the Secure cookie
-    # flag, the __Host- cookie prefix and HSTS. Leave it off for http://localhost.
+    # flag and the __Host- cookie prefix. Leave it off for http://localhost.
     HTTPS = os.environ.get("SV_HTTPS", "0") == "1"
 
     # PBKDF2 work factor (OWASP recommendation for PBKDF2-HMAC-SHA256).
@@ -27,11 +27,6 @@ class Config:
     # Sessions: logged out after 15 minutes of inactivity or 8 hours in total.
     SESSION_IDLE_SECONDS = 15 * 60
     SESSION_ABSOLUTE_SECONDS = 8 * 60 * 60
-
-    # Brute-force protection: failures allowed within the window.
-    LOGIN_WINDOW_SECONDS = 15 * 60
-    LOGIN_MAX_FAILURES_PER_USER = 5
-    LOGIN_MAX_FAILURES_PER_IP = 20
 
     # Password policy (NIST SP 800-63B favours length over complexity rules).
     PASSWORD_MIN_LENGTH = 10

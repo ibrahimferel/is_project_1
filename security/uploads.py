@@ -13,11 +13,10 @@ Content-Type header are chosen by the client and can be anything. So:
 
 Other defences live in app.py:
 * The original filename is NEVER used as a path on disk (path traversal).
-  Files are stored as <random 128-bit id>.bin in a folder outside /static.
+  Files are stored as <random 128-bit id>.<cipher>.bin in a folder outside /static.
 * Stored files are encrypted, so the server never "serves" or executes them.
-* Downloads always use Content-Disposition: attachment plus
-  X-Content-Type-Options: nosniff, so a malicious HTML/SVG file cannot run
-  as a page on our site (stored XSS through uploads).
+* Downloads always use Content-Disposition: attachment, so a malicious
+  HTML/SVG file is saved, not opened as a page on our site.
 
 Limitation to mention: a structurally valid DOC/XLS can still contain
 malicious macros. Malware scanning (e.g. ClamAV) is out of scope.

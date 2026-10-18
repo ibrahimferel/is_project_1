@@ -9,7 +9,7 @@ Request pipeline (every request):
     3. the route        login_required routes also need a logged-in session
     4. finish()         set the session cookie and the security headers
 
-Run:  python app.py      then open http://127.0.0.1:5000
+Run:  python app.py      then open http://127.0.0.1:8000
 """
 
 import hmac
@@ -25,16 +25,19 @@ from functools import wraps
 from flask import (Flask, abort, g, redirect, render_template, request,
                    send_file, url_for)
 
+import analysis
 import db
 import privacy
 from config import Config
 from crypto import envelope, passwords
-from security import ratelimit, uploads
-from security.headers import apply_security_headers
+from security import uploads
 from security.sessions import SessionStore
 
 USERNAME_RE = re.compile(r"^[A-Za-z0-9_]{3,32}$")
 FILE_ID_RE = re.compile(r"^[0-9a-f]{32}$")
+ALGORITHMS = envelope.ALGORITHMS
+META_COLUMNS = {"aes": "meta_ciphertext", "des": "meta_des", "rc4": "meta_rc4"}
+MAX_BENCHMARK_ROUNDS = 10
 
 # Fixed messages selected by a short code in the URL (?msg=saved). User input is
 # never echoed from the URL into the page.
@@ -44,6 +47,7 @@ MESSAGES = {
     "uploaded": "File uploaded and encrypted.",
     "deleted": "File deleted.",
     "logged_out": "You have been logged out.",
+    "benchmarked": "Benchmark finished: the file was decrypted with every cipher.",
 }
 
 security_log = logging.getLogger("securevault.security")
@@ -80,14 +84,17 @@ def create_app(overrides=None):
             return view(*args, **kwargs)
         return wrapper
 
-    def storage_path(file_id: str) -> str:
-        """Path of an encrypted file on disk, with a path-traversal guard.
+    def storage_path(file_id: str, alg: str) -> str:
+        """Path of one cipher's encrypted copy of a file, with a path-traversal guard.
 
-        file_id was already checked against ^[0-9a-f]{32}$, so it cannot contain
-        "/" or "..". The commonpath check is defence in depth.
+        file_id was already checked against ^[0-9a-f]{32}$ and alg is one of
+        ALGORITHMS, so neither can contain "/" or "..". The commonpath check is
+        defence in depth.
         """
+        if alg not in ALGORITHMS:
+            abort(404)
         base = os.path.realpath(app.config["STORAGE_DIR"])
-        path = os.path.realpath(os.path.join(base, file_id + ".bin"))
+        path = os.path.realpath(os.path.join(base, f"{file_id}.{alg}.bin"))
         if os.path.commonpath([base, path]) != base:
             abort(404)
         return path
@@ -96,8 +103,8 @@ def create_app(overrides=None):
         return f"file-{part}|user:{user_id}|id:{file_id}".encode()
 
     def list_files(conn, user_id, dek):
-        rows = conn.execute("SELECT id, meta_ciphertext, created_at FROM files "
-                            "WHERE user_id = ? ORDER BY created_at DESC", (user_id,)).fetchall()
+        rows = conn.execute("SELECT * FROM files WHERE user_id = ? ORDER BY created_at DESC",
+                            (user_id,)).fetchall()
         files = []
         for row in rows:
             meta = json.loads(envelope.open_sealed(dek, row["meta_ciphertext"],
@@ -106,10 +113,18 @@ def create_app(overrides=None):
             files.append(meta)
         return files
 
+    def chosen_alg(default="aes"):
+        alg = request.values.get("alg", default)
+        if alg not in ALGORITHMS:
+            abort(404)
+        return alg
+
     def render_dashboard(conn, status=200, **extra):
         s = g.sess
+        view_alg = chosen_alg()
         ctx = dict(fields=privacy.FIELDS,
-                   profile=privacy.load_profile(conn, s.user_id, s.dek),
+                   view_alg=view_alg, algorithms=ALGORITHMS, alg_labels=envelope.LABELS,
+                   profile=privacy.load_profile(conn, s.user_id, s.dek, view_alg),
                    files=list_files(conn, s.user_id, s.dek),
                    categories=uploads.CATEGORIES,
                    profile_errors={}, upload_error=None,
@@ -147,7 +162,7 @@ def create_app(overrides=None):
                                 secure=app.config["HTTPS"],    # HTTPS only (when enabled)
                                 samesite="Strict",             # not sent on cross-site requests
                                 path="/")                      # no max_age: dies with the browser
-        return apply_security_headers(response, app.config["HTTPS"])
+        return response
 
     @app.template_filter("timestamp")
     def format_timestamp(ts):
@@ -215,29 +230,19 @@ def create_app(overrides=None):
         password = request.form.get("password", "")[:app.config["PASSWORD_MAX_LENGTH"]]
         ip = request.remote_addr or "unknown"
         conn = db.get_db()
-        ratelimit.purge_old(conn, app.config["LOGIN_WINDOW_SECONDS"])
 
-        # Step 1: brute-force check (before doing any expensive work)
-        wait = ratelimit.seconds_until_allowed(conn, username, ip, app.config)
-        if wait:
-            security_log.warning("Login blocked (rate limit) for %r from %s", username, ip)
-            minutes = max(1, round(wait / 60))
-            return render_template("login.html", error=f"Too many failed attempts. "
-                                   f"Try again in about {minutes} minute(s)."), 429
-
-        # Step 2: password verification (parameterised query; constant-time compare)
+        # Step 1: password verification (parameterised query; constant-time compare)
         user = None
         if USERNAME_RE.match(username):
             user = conn.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
         password_ok = passwords.verify_password(password, user["password_hash"] if user else dummy_hash)
 
         if user is None or not password_ok:
-            ratelimit.record_failure(conn, username, ip)
             security_log.warning("Failed login for %r from %s", username, ip)
             # Same message for "no such user" and "wrong password".
             return render_template("login.html", error="Invalid username or password."), 401
 
-        # Step 3: unlock the user's data key with the password-derived key
+        # Step 2: unlock the user's data key with the password-derived key
         kek = passwords.derive_key(password, user["kek_salt"], user["kek_iterations"])
         try:
             dek = envelope.unwrap_key(kek, user["wrapped_dek"], user["username"])
@@ -245,8 +250,7 @@ def create_app(overrides=None):
             security_log.error("Wrapped key for %r failed integrity check", username)
             abort(500)
 
-        # Step 4: authenticated session with a NEW session ID
-        ratelimit.clear_user(conn, username)
+        # Step 3: authenticated session with a NEW session ID
         start_new_session(user["id"], user["username"], dek)
         security_log.info("Successful login for %r from %s", user["username"], ip)
         return redirect(url_for("dashboard"))
@@ -292,21 +296,29 @@ def create_app(overrides=None):
         file_id = secrets.token_hex(16)               # random name: never the user's filename
         meta = {"name": name, "mime": mime, "size": len(data),
                 "category": request.form["category"]}
-        sealed_file = envelope.seal(dek, data, file_context(uid, file_id, "data"))
-        sealed_meta = envelope.seal(dek, json.dumps(meta).encode(), file_context(uid, file_id, "meta"))
+        # One complete encrypted copy per cipher (AES, DES, RC4), each timed.
+        sealed_files, seconds = analysis.seal_all_timed(dek, data, file_context(uid, file_id, "data"))
+        sealed_meta = envelope.seal_all(dek, json.dumps(meta).encode(), file_context(uid, file_id, "meta"))
 
-        path = storage_path(file_id)
-        tmp = path + ".tmp"
-        with open(tmp, "wb") as fh:
-            fh.write(sealed_file)
-        os.replace(tmp, path)                          # atomic: no half-written files
+        written = []
         try:
-            conn.execute("INSERT INTO files (id, user_id, meta_ciphertext, created_at) "
-                         "VALUES (?, ?, ?, ?)", (file_id, uid, sealed_meta, time.time()))
+            for alg in ALGORITHMS:
+                path = storage_path(file_id, alg)
+                tmp = path + ".tmp"
+                with open(tmp, "wb") as fh:
+                    fh.write(sealed_files[alg])
+                os.replace(tmp, path)                  # atomic: no half-written files
+                written.append(path)
+            conn.execute("INSERT INTO files (id, user_id, meta_ciphertext, meta_des, meta_rc4, created_at) "
+                         "VALUES (?, ?, ?, ?, ?, ?)", (file_id, uid, sealed_meta["aes"],
+                                                       sealed_meta["des"], sealed_meta["rc4"], time.time()))
             conn.commit()
         except Exception:
-            os.remove(path)
+            for path in written:
+                os.remove(path)
             raise
+        for alg, spent in seconds.items():
+            analysis.record(conn, uid, file_id, alg, "encrypt", len(data), spent)
         return redirect(url_for("dashboard", msg="uploaded"))
 
     def owned_file_or_404(file_id):
@@ -324,19 +336,26 @@ def create_app(overrides=None):
             abort(404)
         return row
 
+    def decrypt_file(row, alg):
+        """Decrypt one cipher's copy of a file and its metadata, timing the file decryption."""
+        uid, dek, file_id = g.sess.user_id, g.sess.dek, row["id"]
+        try:
+            with open(storage_path(file_id, alg), "rb") as fh:
+                blob = fh.read()
+            data, seconds = analysis.open_timed(dek, blob, file_context(uid, file_id, "data"))
+            meta = json.loads(envelope.open_sealed(dek, row[META_COLUMNS[alg]],
+                                                   file_context(uid, file_id, "meta")))
+        except (OSError, envelope.DecryptionError):
+            security_log.error("File %s (%s copy) is missing or failed its integrity check", file_id, alg)
+            abort(500)
+        analysis.record(db.get_db(), uid, file_id, alg, "decrypt", len(data), seconds)
+        return data, meta
+
     @app.get("/files/<file_id>")
     @login_required
     def download_file(file_id):
         row = owned_file_or_404(file_id)
-        uid, dek = g.sess.user_id, g.sess.dek
-        try:
-            with open(storage_path(file_id), "rb") as fh:
-                data = envelope.open_sealed(dek, fh.read(), file_context(uid, file_id, "data"))
-            meta = json.loads(envelope.open_sealed(dek, row["meta_ciphertext"],
-                                                   file_context(uid, file_id, "meta")))
-        except (OSError, envelope.DecryptionError):
-            security_log.error("File %s is missing or failed its integrity check", file_id)
-            abort(500)
+        data, meta = decrypt_file(row, chosen_alg())
         return send_file(io.BytesIO(data), mimetype=meta["mime"], as_attachment=True,
                          download_name=meta["name"], max_age=0)
 
@@ -346,12 +365,58 @@ def create_app(overrides=None):
         owned_file_or_404(file_id)
         conn = db.get_db()
         conn.execute("DELETE FROM files WHERE id = ? AND user_id = ?", (file_id, g.sess.user_id))
+        conn.execute("DELETE FROM timings WHERE item = ? AND user_id = ?", (file_id, g.sess.user_id))
         conn.commit()
-        try:
-            os.remove(storage_path(file_id))
-        except FileNotFoundError:
-            pass
+        for alg in ALGORITHMS:
+            try:
+                os.remove(storage_path(file_id, alg))
+            except FileNotFoundError:
+                pass
         return redirect(url_for("dashboard", msg="deleted"))
+
+    # ------------------------------------------------- cipher comparison
+
+    @app.get("/analysis")
+    @login_required
+    def analysis_page():
+        conn = db.get_db()
+        uid = g.sess.user_id
+        files = list_files(conn, uid, g.sess.dek)
+        overall, per_item = analysis.timing_report(conn, uid)
+
+        # Ciphertext comparison for one file: each copy split into its parts.
+        selected = next((f for f in files if f["id"] == request.args.get("file")), files[0] if files else None)
+        blobs = []
+        if selected:
+            for alg in ALGORITHMS:
+                path = storage_path(selected["id"], alg)
+                try:
+                    with open(path, "rb") as fh:
+                        head = fh.read(1024 * 1024)
+                    blobs.append(analysis.describe_blob(head, os.path.getsize(path), selected["size"]))
+                except OSError:
+                    security_log.error("File %s (%s copy) is missing", selected["id"], alg)
+        return render_template("analysis.html", files=files, selected=selected, blobs=blobs,
+                               overall=overall, per_item=per_item, algorithms=ALGORITHMS,
+                               alg_labels=envelope.LABELS, profile_sizes=privacy.stored_sizes(conn, uid),
+                               max_rounds=MAX_BENCHMARK_ROUNDS,
+                               message=MESSAGES.get(request.args.get("msg", "")))
+
+    @app.post("/analysis/run")
+    @login_required
+    def run_benchmark():
+        """"Download" a file N times with every cipher, so timings can be compared.
+
+        The ciphers take turns (AES, DES, RC4, AES, ...) so a slow moment on
+        the machine affects all three equally.
+        """
+        row = owned_file_or_404(request.form.get("file_id", ""))
+        rounds = request.form.get("rounds", "")
+        rounds = max(1, min(int(rounds), MAX_BENCHMARK_ROUNDS)) if rounds.isdigit() else 3
+        for _ in range(rounds):
+            for alg in ALGORITHMS:
+                decrypt_file(row, alg)
+        return redirect(url_for("analysis_page", file=row["id"], msg="benchmarked"))
 
     # --------------------------------------------------------- info pages
 
@@ -395,4 +460,6 @@ def create_app(overrides=None):
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
     # debug=False: the Werkzeug debugger allows running code from the browser.
-    create_app().run(host="127.0.0.1", port=5000, debug=False)
+    # Not 5000: on macOS the AirPlay Receiver already listens there and answers
+    # with an empty 403 page.
+    create_app().run(host="127.0.0.1", port=int(os.environ.get("SV_PORT", "8000")), debug=False)

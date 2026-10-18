@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block title %}Register{% endblock %}
+{% block content %}
+<section class="narrow">
+  <h1>Create an account</h1>
+  {% if error %}<p class="notice bad">{{ error }}</p>{% endif %}
+  <form method="post" action="{{ url_for('register') }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label>Username <input name="username" autocomplete="username" required minlength="3" maxlength="32"
+           pattern="[A-Za-z0-9_]{3,32}"></label>
+    <p class="hint">Use a nickname rather than your real name: usernames are the one thing stored unencrypted.</p>
+    <label>Password <input name="password" type="password" autocomplete="new-password" required minlength="10" maxlength="128"></label>
+    <label>Repeat password <input name="confirm" type="password" autocomplete="new-password" required minlength="10" maxlength="128"></label>
+    <p class="hint">At least 10 characters. A long passphrase is easier to remember and harder to guess.</p>
+    <p class="notice warn">If you forget your password, your stored data cannot be recovered. That is the price of real end-to-end protection.</p>
+    <button type="submit">Create account</button>
+  </form>
+</section>
+{% endblock %}

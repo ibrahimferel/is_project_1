@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}SecureVault{% endblock %} | SecureVault</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <header class="site">
+    <a class="brand" href="{{ url_for('index') }}">SecureVault</a>
+    <nav>
+      {% if current_user %}<a href="{{ url_for('dashboard') }}">My vault</a>{% endif %}
+      <a href="{{ url_for('privacy_page') }}">Privacy</a>
+      <a href="{{ url_for('lab.index') }}">Crypto Lab</a>
+      {% if current_user %}
+        <span class="who">Signed in as {{ current_user }}</span>
+        <form method="post" action="{{ url_for('logout') }}" class="inline">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button type="submit" class="link">Log out</button>
+        </form>
+      {% else %}
+        <a href="{{ url_for('login') }}">Log in</a>
+        <a href="{{ url_for('register') }}">Register</a>
+      {% endif %}
+    </nav>
+  </header>
+  <main>
+    {% block content %}{% endblock %}
+  </main>
+  <footer>Student project for learning cryptography. The home-made ciphers are not for production use.</footer>
+</body>
+</html>

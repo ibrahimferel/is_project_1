@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block title %}Hashing vs encryption{% endblock %}
+{% block content %}
+<h1>Hashing vs encryption</h1>
+<div class="two">
+  <div>
+    <h2>Password hashing</h2>
+    <p>One-way. The server stores the hash and, at login, hashes the typed password again and compares. It never needs, and cannot recover, the original.</p>
+  </div>
+  <div>
+    <h2>Encryption</h2>
+    <p>Two-way. Anyone with the key gets the plaintext back. Right for files and personal data the user must read again, wrong for passwords.</p>
+  </div>
+</div>
+<form method="post" class="grid">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <label>A sample password (do not type a real one)<input name="secret" value="{{ secret }}" maxlength="128"></label>
+  <div><button type="submit">Hash and encrypt it</button></div>
+</form>
+{% if result %}
+<h2>Plain SHA-256 (not suitable for passwords)</h2>
+<p><code class="wrap">{{ result.sha }}</code></p>
+<p class="muted">The same password always gives the same hash, so precomputed tables work and identical passwords are visible.
+It is also very fast: GPUs compute billions of SHA-256 hashes per second.</p>
+
+<h2>PBKDF2-HMAC-SHA256 with a random salt, {{ "{:,}".format(result.iterations) }} iterations</h2>
+<div class="scroll"><table class="mono small">
+  <thead><tr><th>Salt</th><th>Hash</th></tr></thead>
+  <tbody>{% for i in range(2) %}<tr><td>{{ result.salts[i] }}</td><td>{{ result.pbkdf[i] }}</td></tr>{% endfor %}</tbody>
+</table></div>
+<p class="muted">Same password, two salts, two unrelated hashes. Each took about {{ "%.0f"|format(result.pbkdf_ms) }} ms,
+which a user does not notice once, but which limits an attacker to a few guesses per second per CPU core.</p>
+
+<h2>AES-256-CBC encryption with a random key</h2>
+<p>Key: <code class="wrap">{{ result.key }}</code></p>
+<p>Ciphertext: <code class="wrap">{{ result.iv }}{{ result.ct }}</code> (IV followed by ciphertext)</p>
+<p>Decrypted again with the key: <strong>{{ result.back }}</strong></p>
+<p class="muted">If this were how passwords were stored, whoever obtained the key (an attacker on the server, a dishonest admin) could read every password.</p>
+{% endif %}
+{% endblock %}

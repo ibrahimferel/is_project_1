@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% block title %}AES step by step{% endblock %}
+{% block content %}
+<h1>AES step by step</h1>
+<p class="lead">Encrypt one 16-byte block and watch the 4x4 state change. The defaults are the official example from FIPS-197 Appendix C.1,
+whose expected ciphertext is <code>69c4e0d86a7b0430d8cdb78070b4c55a</code>.</p>
+<form method="post" class="stack">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <label>Key (32, 48 or 64 hex digits for AES-128, -192 or -256)<input name="key" value="{{ key_hex }}" class="mono"></label>
+  <label>Plaintext block (32 hex digits)<input name="plaintext" value="{{ pt_hex }}" class="mono"></label>
+  <div><button type="submit">Encrypt and decrypt</button></div>
+</form>
+{% if error %}<p class="notice bad">{{ error }}</p>{% endif %}
+
+{% if result %}
+<p class="notice ok">AES-{{ result.key_bits }}, {{ result.rounds }} rounds. Ciphertext <code>{{ result.ct }}</code>,
+decrypted back to <code>{{ result.back }}</code>.</p>
+
+<h2>Key expansion</h2>
+<p class="muted">The key is stretched into {{ result.rounds + 1 }} round keys. Each new 4-byte word is the XOR of the word one key-length back and the previous word;
+every key-length-th word first goes through RotWord, SubWord and a round constant (Rcon).</p>
+<div class="scroll"><table class="mono small">
+  <thead><tr><th>Round</th><th>Round key</th></tr></thead>
+  <tbody>{% for rk in result.round_keys %}<tr><td>{{ loop.index0 }}</td><td>{{ rk.hex() }}</td></tr>{% endfor %}</tbody>
+</table></div>
+
+<h2>Encryption</h2>
+<p class="muted">The state is filled column by column. Watch ShiftRows rotate row r left by r places, and MixColumns change every byte of a column at once.</p>
+<div class="states">
+{% for t in result.enc_trace %}
+  <figure>
+    <figcaption>Round {{ t.round }}: {{ t.step }}</figcaption>
+    <table class="state">{% for row in t.state | matrix %}<tr>{% for b in row %}<td>{{ b }}</td>{% endfor %}</tr>{% endfor %}</table>
+  </figure>
+{% endfor %}
+</div>
+
+<h2>Decryption</h2>
+<p class="muted">The inverse operations in reverse order: InvShiftRows, InvSubBytes, AddRoundKey (its own inverse), InvMixColumns.</p>
+<div class="states">
+{% for t in result.dec_trace %}
+  <figure>
+    <figcaption>Round {{ t.round }}: {{ t.step }}</figcaption>
+    <table class="state">{% for row in t.state | matrix %}<tr>{% for b in row %}<td>{{ b }}</td>{% endfor %}</tr>{% endfor %}</table>
+  </figure>
+{% endfor %}
+</div>
+{% endif %}
+{% endblock %}

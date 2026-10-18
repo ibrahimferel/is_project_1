@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block title %}Crypto Lab{% endblock %}
+{% block content %}
+<h1>Crypto Lab</h1>
+<p class="lead">Step through the algorithms used in this project. The lab never touches stored user data.</p>
+<ul class="tools">
+  <li><a href="{{ url_for('lab.aes_lab') }}">AES, round by round</a>: SubBytes, ShiftRows, MixColumns, AddRoundKey and key expansion.</li>
+  <li><a href="{{ url_for('lab.des_lab') }}">DES, round by round</a>: the 16 Feistel rounds and the key schedule.</li>
+  <li><a href="{{ url_for('lab.rc4_lab') }}">RC4</a>: key scheduling, keystream generation and why keystream reuse is fatal.</li>
+  <li><a href="{{ url_for('lab.modes_lab') }}">ECB vs CBC</a>: why ECB leaks the structure of your data.</li>
+  <li><a href="{{ url_for('lab.hashing_lab') }}">Hashing vs encryption</a>: one-way password hashes versus reversible encryption.</li>
+</ul>
+
+<h2>Which algorithms are fit for real use?</h2>
+<div class="scroll">
+<table>
+  <thead><tr><th>Algorithm</th><th>Status</th><th>Where it is used here</th><th>Why</th></tr></thead>
+  <tbody>
+    <tr><td>AES-256 in CBC mode + HMAC-SHA256</td><td><span class="tag ok">Modern</span></td><td>All stored data and files</td>
+        <td>AES is the current standard (FIPS-197). CBC with a random IV hides patterns; the HMAC detects tampering. AES-GCM would be the usual modern choice and does both in one step.</td></tr>
+    <tr><td>PBKDF2-HMAC-SHA256, 600,000 iterations</td><td><span class="tag ok">Acceptable</span></td><td>Password hashes and the password-derived key</td>
+        <td>Salted and deliberately slow. Argon2id is preferred for new systems because it is also memory-hard.</td></tr>
+    <tr><td>SHA-256 / HMAC-SHA256</td><td><span class="tag ok">Modern</span></td><td>Inside HMAC and PBKDF2</td><td>No practical attacks known. On its own, too fast for password storage.</td></tr>
+    <tr><td>AES in ECB mode</td><td><span class="tag bad">Insecure mode</span></td><td>Lab only</td><td>Equal blocks encrypt to equal ciphertext, so structure leaks.</td></tr>
+    <tr><td>DES</td><td><span class="tag bad">Broken</span></td><td>Lab only</td><td>56-bit key, brute-forced in 1998 by the EFF's Deep Crack. Withdrawn as a standard in 2005.</td></tr>
+    <tr><td>Triple DES (3DES)</td><td><span class="tag bad">Deprecated</span></td><td>Not used</td><td>64-bit block (Sweet32 attack) and slow; disallowed by NIST for encryption after 2023.</td></tr>
+    <tr><td>RC4</td><td><span class="tag bad">Broken</span></td><td>Lab only</td><td>Biased keystream, broke WEP Wi-Fi, prohibited in TLS by RFC 7465.</td></tr>
+    <tr><td>Home-made AES (this project)</td><td><span class="tag warn">Educational</span></td><td>Everywhere AES is used</td>
+        <td>Correct output (tested against official vectors) but not constant-time and slow. Real systems use audited libraries.</td></tr>
+  </tbody>
+</table>
+</div>
+{% endblock %}

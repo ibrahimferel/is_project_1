@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block title %}RC4{% endblock %}
+{% block content %}
+<h1>RC4 stream cipher</h1>
+<p class="notice warn">Educational only. RC4 is broken and prohibited in TLS (RFC 7465).</p>
+<p class="lead">RC4 turns the key into a keystream and XORs it with the data. Here both messages are encrypted with the same key,
+a classic mistake, to show what an attacker gains.</p>
+<form method="post" class="grid">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <label>Key (text)<input name="key" value="{{ key_text }}" maxlength="64"></label>
+  <label>Message 1<input name="msg1" value="{{ msg1 }}" maxlength="200"></label>
+  <label>Message 2<input name="msg2" value="{{ msg2 }}" maxlength="200"></label>
+  <div><button type="submit">Run RC4</button></div>
+</form>
+{% if error %}<p class="notice bad">{{ error }}</p>{% endif %}
+{% if result %}
+<h2>1. Key-scheduling algorithm (KSA)</h2>
+<p class="muted">S starts as 0, 1, ..., 255. For i = 0..255: j = (j + S[i] + key[i mod keylen]) mod 256, then swap S[i] and S[j]. The result is a key-dependent permutation:</p>
+<div class="scroll"><table class="mono small sbox">
+  {% for row in result.s_rows %}<tr>{% for v in row %}<td>{{ "%02x"|format(v) }}</td>{% endfor %}</tr>{% endfor %}
+</table></div>
+
+<h2>2. Keystream generation (PRGA)</h2>
+<p class="muted">Each step: i = i + 1, j = j + S[i], swap S[i] and S[j], output S[S[i] + S[j]] (all mod 256).</p>
+<p>Keystream: <code class="wrap">{{ result.keystream }}</code></p>
+<p>Ciphertext 1: <code class="wrap">{{ result.c1 }}</code></p>
+<p>Ciphertext 2: <code class="wrap">{{ result.c2 }}</code></p>
+
+<h2>3. The keystream-reuse attack</h2>
+<p>C1 XOR C2: <code class="wrap">{{ result.c_xor }}</code></p>
+<p>P1 XOR P2: <code class="wrap">{{ result.p_xor }}</code></p>
+<p class="notice {{ 'bad' if result.xor_equal else 'ok' }}">{{ "They are identical: the key has cancelled out." if result.xor_equal else "They differ." }}</p>
+<p>An attacker who knows or guesses message 1 recovers message 2 without the key: P2 = C1 XOR C2 XOR P1 =
+<strong>{{ result.recovered }}</strong></p>
+<p class="muted">This is why a stream cipher must never reuse a key and nonce, and part of how WEP was broken.</p>
+{% endif %}
+{% endblock %}
